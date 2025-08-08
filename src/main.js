@@ -1,75 +1,90 @@
-import TelegramBot from 'node-telegram-bot-api';
-import { Client, Databases, ID } from 'node-appwrite';
+// src/main.js
+import { Client, Databases, ID } from "node-appwrite";
+import TelegramBot from "node-telegram-bot-api";
 
-// --- اتصال به Appwrite ---
+// متغیرهای محیطی از Appwrite Function
+const API_KEY = process.env["real-estate-bot-api"];
+const TELEGRAM_TOKEN = process.env["telegram-bot-token"];
+const PROJECT_ID = process.env.APPWRITE_FUNCTION_PROJECT_ID; 
+const API_ENDPOINT = process.env.APPWRITE_FUNCTION_ENDPOINT;
+
+// اتصال به Appwrite
 const client = new Client()
-    .setEndpoint(process.env.API_ENDPOINT) // مثلا https://cloud.appwrite.io/v1
-    .setProject(process.env.PROJECT_ID)
-    .setKey(process.env['real-estate-bot-api']); // API Key
+    .setEndpoint(API_ENDPOINT)
+    .setProject(PROJECT_ID)
+    .setKey(API_KEY);
 
 const databases = new Databases(client);
 
-// اطلاعات دیتابیس و کالکشن
-const DATABASE_ID = process.env.DATABASE_ID;
-const COLLECTION_ID = process.env.COLLECTION_USERS_ID;
+// اتصال به تلگرام
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// --- اتصال به تلگرام ---
-const bot = new TelegramBot(process.env['telegram-bot-token'], { polling: true });
-
-// یک آبجکت ساده برای ذخیره موقت وضعیت هر کاربر
+// برای ذخیره وضعیت کاربر
 const userStates = {};
 
-// مرحله اول: استارت
+// شروع مکالمه
 bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
-    userStates[chatId] = { step: 'name' };
-    bot.sendMessage(chatId, 'سلام! لطفاً نام و نام خانوادگی خود را وارد کنید:');
+    userStates[chatId] = { step: "askPhone" };
+
+    bot.sendMessage(chatId, "لطفا شماره تلفنت رو ارسال کن:", {
+        reply_markup: {
+            keyboard: [
+                [{ text: "ارسال شماره تلفن 📱", request_contact: true }]
+            ],
+            resize_keyboard: true,
+            one_time_keyboard: true
+        }
+    });
 });
 
-// گرفتن پیام‌های متنی
-bot.on('message', async (msg) => {
+// گرفتن شماره تلفن
+bot.on("contact", (msg) => {
     const chatId = msg.chat.id;
-    const text = msg.text;
+    if (userStates[chatId]?.step === "askPhone") {
+        userStates[chatId].phone = msg.contact.phone_number;
+        userStates[chatId].step = "askFirstName";
 
-    if (!userStates[chatId]) return; // اگر استارت نکرده بود
+        bot.sendMessage(chatId, "اسمت رو وارد کن:");
+    }
+});
 
+// گرفتن اسم
+bot.on("message", (msg) => {
+    const chatId = msg.chat.id;
     const state = userStates[chatId];
 
-    if (state.step === 'name' && text !== '/start') {
-        state.fullName = text;
-        state.step = 'phone';
-        bot.sendMessage(chatId, 'لطفاً شماره تماس خود را ارسال کنید:', {
-            reply_markup: {
-                keyboard: [[{ text: 'ارسال شماره 📱', request_contact: true }]],
-                resize_keyboard: true,
-                one_time_keyboard: true
-            }
-        });
+    if (!state) return;
+
+    if (state.step === "askFirstName" && !msg.contact) {
+        state.first_name = msg.text;
+        state.step = "askLastName";
+        bot.sendMessage(chatId, "فامیلت رو وارد کن:");
     }
-
-    // گرفتن شماره
-    if (state.step === 'phone' && msg.contact) {
-        const phone = msg.contact.phone_number;
-        state.phone = phone;
-
-        try {
-            await databases.createDocument(
-                DATABASE_ID,
-                COLLECTION_ID,
-                ID.unique(),
-                {
-                    name: state.fullName,
-                    phone: state.phone,
-                    telegram_id: chatId
-                }
-            );
-
-            bot.sendMessage(chatId, '✅ اطلاعات شما با موفقیت ثبت شد.');
-        } catch (error) {
-            console.error(error);
-            bot.sendMessage(chatId, '❌ خطا در ذخیره‌سازی اطلاعات.');
-        }
-
-        delete userStates[chatId]; // پاک کردن وضعیت
+    else if (state.step === "askLastName") {
+        state.last_name = msg.text;
+        saveUserData(state)
+            .then(() => {
+                bot.sendMessage(chatId, "اطلاعاتت با موفقیت ذخیره شد ✅");
+                delete userStates[chatId];
+            })
+            .catch(err => {
+                console.error(err);
+                bot.sendMessage(chatId, "خطا در ذخیره اطلاعات ❌");
+            });
     }
 });
+
+// ذخیره در دیتابیس Appwrite
+async function saveUserData(data) {
+    await databases.createDocument(
+        "real-estate",     // databaseId
+        "clients",         // collectionId
+        ID.unique(),
+        {
+            first_name: data.first_name,
+            last_name: data.last_name,
+            phone: data.phone
+        }
+    );
+}
