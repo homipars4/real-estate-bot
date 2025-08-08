@@ -1,35 +1,75 @@
-import { Client, Users } from 'node-appwrite';
+import TelegramBot from 'node-telegram-bot-api';
+import { Client, Databases, ID } from 'node-appwrite';
 
-// This Appwrite function will be executed every time your function is triggered
-export default async ({ req, res, log, error }) => {
-  // You can use the Appwrite SDK to interact with other services
-  // For this example, we're using the Users service
-  const client = new Client()
-    .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
-    .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
-    .setKey(req.headers['x-appwrite-key'] ?? '');
-  const users = new Users(client);
+// --- اتصال به Appwrite ---
+const client = new Client()
+    .setEndpoint(process.env.API_ENDPOINT) // مثلا https://cloud.appwrite.io/v1
+    .setProject(process.env.PROJECT_ID)
+    .setKey(process.env['real-estate-bot-api']); // API Key
 
-  try {
-    const response = await users.list();
-    // Log messages and errors to the Appwrite Console
-    // These logs won't be seen by your end users
-    log(`Total users: ${response.total}`);
-  } catch(err) {
-    error("Could not list users: " + err.message);
-  }
+const databases = new Databases(client);
 
-  // The req object contains the request data
-  if (req.path === "/ping") {
-    // Use res object to respond with text(), json(), or binary()
-    // Don't forget to return a response!
-    return res.text("Pong");
-  }
+// اطلاعات دیتابیس و کالکشن
+const DATABASE_ID = process.env.DATABASE_ID;
+const COLLECTION_ID = process.env.COLLECTION_USERS_ID;
 
-  return res.json({
-    motto: "Build like a team of hundreds_",
-    learn: "https://appwrite.io/docs",
-    connect: "https://appwrite.io/discord",
-    getInspired: "https://builtwith.appwrite.io",
-  });
-};
+// --- اتصال به تلگرام ---
+const bot = new TelegramBot(process.env['telegram-bot-token'], { polling: true });
+
+// یک آبجکت ساده برای ذخیره موقت وضعیت هر کاربر
+const userStates = {};
+
+// مرحله اول: استارت
+bot.onText(/\/start/, (msg) => {
+    const chatId = msg.chat.id;
+    userStates[chatId] = { step: 'name' };
+    bot.sendMessage(chatId, 'سلام! لطفاً نام و نام خانوادگی خود را وارد کنید:');
+});
+
+// گرفتن پیام‌های متنی
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+
+    if (!userStates[chatId]) return; // اگر استارت نکرده بود
+
+    const state = userStates[chatId];
+
+    if (state.step === 'name' && text !== '/start') {
+        state.fullName = text;
+        state.step = 'phone';
+        bot.sendMessage(chatId, 'لطفاً شماره تماس خود را ارسال کنید:', {
+            reply_markup: {
+                keyboard: [[{ text: 'ارسال شماره 📱', request_contact: true }]],
+                resize_keyboard: true,
+                one_time_keyboard: true
+            }
+        });
+    }
+
+    // گرفتن شماره
+    if (state.step === 'phone' && msg.contact) {
+        const phone = msg.contact.phone_number;
+        state.phone = phone;
+
+        try {
+            await databases.createDocument(
+                DATABASE_ID,
+                COLLECTION_ID,
+                ID.unique(),
+                {
+                    name: state.fullName,
+                    phone: state.phone,
+                    telegram_id: chatId
+                }
+            );
+
+            bot.sendMessage(chatId, '✅ اطلاعات شما با موفقیت ثبت شد.');
+        } catch (error) {
+            console.error(error);
+            bot.sendMessage(chatId, '❌ خطا در ذخیره‌سازی اطلاعات.');
+        }
+
+        delete userStates[chatId]; // پاک کردن وضعیت
+    }
+});
